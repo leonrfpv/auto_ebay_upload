@@ -833,13 +833,20 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
     url = resolver.discover(row)
     if not url:
         return {"Status": "NO_SOURCE_URL", "SKU": row.sku or row.auto_sku(), "When": now_iso()}
-
+    from urllib.parse import urlparse as _u
+p = _u(url)
+host = p.netloc.lower()
+# wenn hortitec, aber nicht EN, dann auf EN mappen
+if "hortitec.es" in host and "/en/" not in p.path:
+    mapped = resolver._map_to_en(url)
+    if mapped:
+        url = mapped
+        host = _u(url).netloc.lower()
     from urllib.parse import urlparse as _u
     host = _u(url).netloc.lower()
     prefer_en = ("hortitec.es" in host) and ("/en/" in url)
     used_js = False
     back_src = ""
-    blocks, imgs = []
     blocks, imgs = [], []
 
     # --- Shopify JSON priorisieren (ideal für Variantenbilder) ---
