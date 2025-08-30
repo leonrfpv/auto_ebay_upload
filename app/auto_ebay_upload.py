@@ -64,25 +64,81 @@ def split_tokens(s: str) -> List[str]:
 def variant_synonyms(v: str) -> List[str]:
     v = (v or "").strip().lower()
     out = {v}
-    # normalize commas, dots, units
+    # Normalisierungen
     out.add(v.replace(",", "."))
     out.add(v.replace("l", " l"))
-    # ml <-> l
-    m = re.search(r"(\d+)\s*ml", v)
+    out.add(v.replace(" ", ""))  # "0,5l"
+    # ml <-> l ableiten
+    m = re.search(r"(\d+[.,]?\d*)\s*(ml|l)\b", v)
     if m:
-        ml = int(m.group(1))
-        out.add(f"{ml} ml")
-        if ml == 500:
-            out.update({"0,5 l", "0.5 l", "0,5l", "0.5l", "500ml"})
-        if ml == 1000:
-            out.update({"1 l", "1l", "1000 ml", "1000ml"})
-        if ml == 2500:
-            out.update({"2,5 l", "2.5 l", "2,5l", "2.5l", "2500 ml"})
+        val = m.group(1).replace(",", ".")
+        unit = m.group(2)
+        try:
+            x = float(val)
+            if unit == "l":
+                ml = int(round(x * 1000))
+                out.update({f"{ml} ml", f"{ml}ml", f"{val}l", f"{val} l", f"{val.replace('.',',')} l"})
+                if ml == 500:
+                    out.update({"0,5l", "0.5l", "0,5 l", "0.5 l"})
+            else:  # ml
+                ml = int(round(x))
+                out.update({f"{ml} ml", f"{ml}ml"})
+                if ml == 500:
+                    out.update({"0,5l", "0.5l", "0,5 l", "0.5 l"})
+                if ml == 1000:
+                    out.update({"1l", "1 l"})
+        except Exception:
+            pass
+    # geläufige Schreibweisen
     if "0,5" in v or "0.5" in v:
-        out.update({"0,5 l", "0.5 l", "500 ml", "500ml"})
-    if "2,5" in v or "2.5" in v:
-        out.update({"2,5 l", "2.5 l", "2500 ml"})
+        out.update({"0,5 l", "0.5 l", "0,5l", "0.5l", "500 ml", "500ml"})
     return sorted({t.strip() for t in out if t.strip()})
+
+def desired_size_patterns(variant: str) -> Tuple[List[re.Pattern], List[re.Pattern]]:
+    """
+    Liefert (good_patterns, bad_patterns).
+    good_patterns matchen exakt die gewünschte Größe (z.B. 500ml / 0,5l),
+    bad_patterns matchen gängige andere Größen (um falsche Bilder abzustrafen).
+    """
+    v = (variant or "").lower()
+    good = []
+    bad = []
+    # Zielgröße extrahieren
+    m = re.search(r"(\d+[.,]?\d*)\s*(ml|l)\b", v)
+    target_ml = None
+    if m:
+        val = m.group(1).replace(",", ".")
+        unit = m.group(2)
+        try:
+            x = float(val)
+            target_ml = int(round(x * (1000 if unit == "l" else 1)))
+        except Exception:
+            pass
+    # Good-Pattern (Ziel)
+    if target_ml:
+        ml = target_ml
+        l = ml/1000.0
+        good += [
+            re.compile(rf'(?:^|[_\-]){ml}\s*ml(?:[^0-9]|$)'),
+            re.compile(rf'(?:^|[_\-]){ml}ml(?:[^0-9]|$)'),
+            re.compile(rf'(?:^|[_\-]){l:.1f}\s*l(?:[^0-9]|$)'.replace('.', r'[.,]')),
+            re.compile(rf'(?:^|[_\-]){str(l).replace(".",",")}\s*l(?:[^0-9]|$)'),
+            re.compile(rf'(?:^|[_\-]){str(l).replace(".",",")}l(?:[^0-9]|$)'),
+        ]
+    # Bad-Pattern (andere typische Größen)
+    other_mls = [10,20,50,100,250,500,1000,1500,2000,2500,5000,10000]
+    if target_ml:
+        other_mls = [x for x in other_mls if x != target_ml]
+    for ml in other_mls:
+        l = ml/1000.0
+        bad += [
+            re.compile(rf'(?:^|[_\-]){ml}\s*ml(?:[^0-9]|$)'),
+            re.compile(rf'(?:^|[_\-]){ml}ml(?:[^0-9]|$)'),
+            re.compile(rf'(?:^|[_\-]){l:.1f}\s*l(?:[^0-9]|$)'.replace('.', r'[.,]')),
+            re.compile(rf'(?:^|[_\-]){str(l).replace(".",",")}l(?:[^0-9]|$)'),
+        ]
+    return good, bad
+
 
 # ---------- Datenmodell ----------
 @dataclass
@@ -395,12 +451,44 @@ def ensure_german(desc_html: str) -> str:
     except Exception as e:
         logline(f"Translation error: {e}")
     return desc_html
+POS_KEYS = {"anwendung","dosierung","inhalt","zusammensetzung","npk","gebrauchsanweisung","analyse","hinweis","eigenschaften","beschreibung","produktbeschreibung"}
+NEG_KEYS_HARD = {"menü schließen","menü schliessen","weiterlesen","ähnliche produkte","related products","you may also like","newsletter","breadcrumb","warenkorb","shop","kategorie","filter"}
+NEG_OTHER_PRODUCTS = {"root","supervit","hydro","blüh","blüh","bloom","coco","kokos","complex"}  # typische Hesi-Begriffe anderer Produkte
 
+def rank_desc_blocks(blocks: List[str], brand: str, name: str) -> List[str]:
+    ranked = []
+    for b in blocks:
+        txt = BeautifulSoup(b, "lxml").get_text(" ", strip=True).lower()
+        if not txt or len(txt) < 80:
+            continue
+        # harte Exklusion von Navigations-/Shop-Elementen
+        if any(k in txt for k in NEG_KEYS_HARD):
+            continue
+        # Score aufbauen
+        s = 0
+        # Länge (gedeckelt)
+        s += min(len(txt)//120, 10)
+        # Marke/Produkt
+        if brand.lower() in txt: s += 5
+        if name.lower() in txt:  s += 6
+        # Fachwörter
+        s += sum(2 for k in POS_KEYS if k in txt)
+        # Andere Hesi-Produkte abwerten
+        if sum(1 for k in NEG_OTHER_PRODUCTS if k in txt) >= 2:
+            s -= 6
+        ranked.append((s, b))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    # die besten 1–3 Blöcke
+    return [b for s, b in ranked[:3] if s > 0]
 
 def combine_description(brand: str, name: str, variant: str, blocks: List[str]) -> str:
-    # mehrere Blöcke zusammenfügen, doppelte Inhalte vermeiden
+    # nur beste Blöcke zulassen
+    top = rank_desc_blocks(blocks, brand, name)
+    if not top:
+        top = blocks[:1]  # Fallback: wenigstens der beste
+    # Duplikate vermeiden
     uniq, seen = [], set()
-    for b in blocks:
+    for b in top:
         t = BeautifulSoup(b, "lxml").get_text(" ", strip=True)
         if t and t not in seen:
             uniq.append(b); seen.add(t)
@@ -408,48 +496,79 @@ def combine_description(brand: str, name: str, variant: str, blocks: List[str]) 
     header = f"<h2>{html.escape(brand)} {html.escape(name)} – {html.escape(variant)}</h2>"
     return header + sanitize_html(body)
 
+
+
+
 # ---------- Bilder-Scoring (richtige Bilder priorisieren) ----------
 def score_images(urls: List[str], brand: str, name: str, variant: str, source_domain: str) -> List[str]:
     brand_tokens = set(split_tokens(brand))
     name_tokens = set(split_tokens(name))
     var_tokens = set(split_tokens(" ".join(variant_synonyms(variant))))
-    # negative Wörter – generisch (z. B. andere Hesi-Produkte)
-    negative = {"root", "supervit", "starter", "nz", "micro", "ph", "test", "kit"}
+
+    # klare No-Gos (andere Hesi-Produkte etc.)
+    negative_words = {
+        "root", "supervit", "hydro", "coco", "kokos", "bluh", "blüh", "complex", "complexe", "bloom", "starter", "kit", "test"
+    }
+
+    good_sizes, bad_sizes = desired_size_patterns(variant)
 
     def tokens_in(s: str, toks: set) -> int:
         low = s.lower()
         return sum(1 for t in toks if t and t in low)
 
+    def match_any(patterns: List[re.Pattern], s: str) -> bool:
+        return any(p.search(s) for p in patterns)
+
     def score(u: str) -> int:
+        from urllib.parse import urlparse
         p = urlparse(u)
+        netloc = p.netloc.lower()
         fname = os.path.basename(p.path).lower()
+
         sc = 0
-        # domain-Priorität
-        if p.netloc.endswith(urlparse(source_domain).netloc):
-            sc += 4
-        if "cdn.shopify.com" in p.netloc or "cdn" in p.netloc:
-            sc += 1
-        # marken-/namensbezug
+        # Quelle gewichten
+        if source_domain:
+            try:
+                src_netloc = urlparse(source_domain).netloc.lower()
+                if src_netloc and src_netloc in netloc:
+                    sc += 6
+            except Exception:
+                pass
+        if "cdn.shopify.com" in netloc:
+            sc += 2
+
+        # Variantengröße: Treffer massiv belohnen / falsche stark bestrafen
+        if good_sizes and match_any(good_sizes, fname):
+            sc += 20
+        if bad_sizes and match_any(bad_sizes, fname):
+            sc -= 15
+
+        # Produkt-/Markenbezug
         sc += 5 * tokens_in(fname, brand_tokens)
-        sc += 6 * tokens_in(fname, name_tokens)
+        sc += 8 * tokens_in(fname, name_tokens)   # Produktname noch wichtiger
         sc += 4 * tokens_in(fname, var_tokens)
-        # Dateigröße-Indikator (1920x1920 etc.)
+
+        # hochauflösende Produktshots etwas bevorzugen
         if re.search(r"(?:^|[_-])(1200|1600|1920|2048|2400)(?:x|[_.-])", fname):
             sc += 2
-        # negative Begriffe abwerten
-        if any(neg in fname for neg in negative):
-            sc -= 6
+
+        # Off-Topic hart abwerten
+        if any(w in fname for w in negative_words):
+            sc -= 10
+
         return sc
 
     ranked = sorted(urls, key=score, reverse=True)
-    # dedup nach Dateinamen (gleiche Bilder in mehreren Auflösungen)
+    # Dateinamen-Deduplizierung (gleiche Bilder in verschiedenen Auflösungen)
     out, seen = [], set()
     for u in ranked:
         fn = os.path.basename(urlparse(u).path).lower()
         if fn not in seen:
             out.append(u); seen.add(fn)
-        if len(out) >= 12: break
+        if len(out) >= 12:
+            break
     return out
+
 
 # ---------- Kuratierte letzte Rettung ----------
 FALLBACK_HTML = {
@@ -549,7 +668,8 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
             logline(f"Using curated fallback text for {key}")
 
     # 5) Bilder scoren und ggf. nach Variante filtern
-    src_domain = url
+    from urllib.parse import urlparse as _u
+    src_domain = f"{_u(url).scheme}://{_u(url).netloc}"
     imgs = score_images(imgs, row.brand, row.name, row.variant, src_domain)
     if variant_image_filter and row.variant:
         vt = variant_synonyms(row.variant)
