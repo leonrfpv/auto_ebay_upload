@@ -1,1 +1,12 @@
+requests
+beautifulsoup4
+lxml
+pandas
+openpyxl
+python-dotenv
+html2text
+Pillow
+langdetect
+playwright
+deep_translator
 
