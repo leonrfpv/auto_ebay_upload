@@ -383,6 +383,27 @@ def fetch_shopify_product_json(session: requests.Session, product_url: str) -> T
     except Exception:
         pass
     return None, ""
+def horti_en_candidates_from_url(any_product_url: str) -> List[str]:
+    """
+    Aus einem beliebigen hortitec-Produktlink (DE/ES/EN) den Handle extrahieren
+    und eine Prioritätenliste an EN/ES/DE-Kandidaten zurückgeben.
+    """
+    handle, base = _shopify_handle_and_base(any_product_url)
+    if not handle:
+        return [any_product_url]  # nichts ableitbar
+    cands = [
+        f"https://hortitec.es/en/products/{handle}",  # bevorzugt
+        f"https://hortitec.es/products/{handle}",     # ES (ohne /en) – manchmal mit englischem Body
+    ]
+    # Ursprungs-URL und ggf. deutsche Variante auch anhängen (Fallback)
+    cands.append(any_product_url)
+    cands.append(f"https://www.hortitec.de/products/{handle}")
+    # Duplikate entfernen, Reihenfolge behalten
+    seen, out = set(), []
+    for u in cands:
+        if u not in seen:
+            out.append(u); seen.add(u)
+    return out
 
 def images_for_variant_from_shopify(product: dict, mode: str, variant_text: str) -> List[str]:
     """
@@ -829,32 +850,32 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
     logline(f"process_single brand={row.brand} name={row.name} variant={row.variant} js={js_render} dry={dry}")
     resolver = SourceResolver(APPDIR / "manufacturers.json")
     parser = Parser()
-
-    url = resolver.discover(row)
+        url = resolver.discover(row)
     if not url:
         return {"Status": "NO_SOURCE_URL", "SKU": row.sku or row.auto_sku(), "When": now_iso()}
 
-    # Falls hortitec, aber nicht /en/, versuche auf EN zu mappen
     from urllib.parse import urlparse as _u
     p = _u(url)
-    if "hortitec.es" in p.netloc.lower() and "/en/" not in p.path:
-        mapped = resolver._map_to_en(url)
-        if mapped:
-            url = mapped
-            p = _u(url)
-
-    host = p.netloc.lower()
-    prefer_en = ("hortitec.es" in host) and ("/en/" in p.path)
-
     used_js = False
     back_src = ""
     source_used = "page"
     blocks, imgs = [], []
 
-    # --- 1) Shopify-JSON priorisieren (perfekt für Variantenbilder) ---
-    shop_json, shop_mode = fetch_shopify_product_json(parser.s, url)
+    # --- Shop-JSON zuerst mit EN-Prioritaet ---
+    shop_json = None
+    shop_mode = ""
+    try_candidates = horti_en_candidates_from_url(url) if ("hortitec." in p.netloc.lower()) else [url]
+
+    for cand in try_candidates:
+        sj, sm = fetch_shopify_product_json(parser.s, cand)
+        if sj:
+            shop_json, shop_mode = sj, sm
+            url = cand  # wir setzen die Quelle um auf EN-Kandidat, wenn erfolgreich
+            break
+
     if shop_json:
         source_used = f"shopify:{shop_mode}"
+        # Beschreibung direkt aus Shopify (EN bevorzugt) -> später nach DE
         body_html = ""
         if shop_mode == "json":
             body_html = shop_json.get("body_html") or ""
@@ -862,9 +883,15 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
             body_html = shop_json.get("description") or ""
         if body_html and len(BeautifulSoup(body_html, "lxml").get_text(" ", strip=True)) > 80:
             blocks = [body_html]
-        # EXAKTE Variantenbilder (z. B. 0,5 L / 500 ml)
+        # VARIANTEN-Bilder exakt
         imgs = images_for_variant_from_shopify(product=shop_json, mode=shop_mode, variant_text=row.variant)
 
+    # EN-Flag nach evtl. Ueberschreibung von url neu bestimmen
+    p = _u(url)
+    host = p.netloc.lower()
+    prefer_en = ("hortitec.es" in host) and ("/en/" in p.path)
+
+   
     # Hilfsfunktion für Textlänge
     def desc_len(blist: List[str]) -> int:
         return len(BeautifulSoup("\n".join(blist), "lxml").get_text(" ", strip=True))
