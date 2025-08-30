@@ -342,9 +342,105 @@ class Parser:
         desc_blocks = self._desc_blocks(soup)
         imgs = self._collect_imgs(soup, base)
         return desc_blocks, imgs
+    def _shopify_handle_and_base(product_url: str) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        p = urlparse(product_url)
+        parts = p.path.strip("/").split("/")
+        if "products" in parts:
+            idx = parts.index("products")
+            handle = parts[idx+1] if idx+1 < len(parts) else None
+            base = f"{p.scheme}://{p.netloc}"
+            return handle, base
+    except Exception:
+        pass
+    return None, None
+
+def fetch_shopify_product_json(session: requests.Session, product_url: str) -> Tuple[Optional[dict], str]:
+    """
+    Versucht zuerst /products/<handle>.json (reichhaltig, inkl. variant_ids an Bildern),
+    fällt dann auf /products/<handle>.js zurück (einfacheres JSON).
+    Gibt (product_dict, mode) zurück, mode in {"json","js",""}.
+    """
+    handle, base = _shopify_handle_and_base(product_url)
+    if not handle or not base:
+        return None, ""
+    # .json
+    try:
+        jurl = f"{base}/products/{handle}.json"
+        r = session.get(jurl, timeout=12, headers={"User-Agent": UA})
+        if r.ok and r.headers.get("Content-Type","").startswith("application/json"):
+            data = r.json().get("product")
+            if data: return data, "json"
+    except Exception:
+        pass
+    # .js
+    try:
+        jurl = f"{base}/products/{handle}.js"
+        r = session.get(jurl, timeout=12, headers={"User-Agent": UA})
+        if r.ok and "application/javascript" in r.headers.get("Content-Type",""):
+            data = r.json()  # Shopify liefert auch hier JSON
+            return data, "js"
+    except Exception:
+        pass
+    return None, ""
+
+def images_for_variant_from_shopify(product: dict, mode: str, variant_text: str) -> List[str]:
+    """
+    Liefert eine geordnete Liste von Bild-URLs passend zur Variantengröße.
+    Nutzt bei .json 'images[].variant_ids' zum harten Mapping.
+    Fällt sonst auf Dateiname/alt-Text/Scoring zurück.
+    """
+    vtoks = set(split_tokens(" ".join(variant_synonyms(variant_text))))
+    out = []
+
+    if mode == "json":
+        # product["images"] = [{src, alt, variant_ids:[...]}], product["variants"]=[{id,title},...]
+        id_by_title = {}
+        for v in product.get("variants", []):
+            t = (v.get("title") or "").lower()
+            id_by_title[t] = v.get("id")
+        # best variant id candidate
+        best_id = None
+        for title, vid in id_by_title.items():
+            if any(t in title for t in vtoks):
+                best_id = vid; break
+        imgs = product.get("images", [])
+        # 1) exakte variant_ids-Treffer
+        if best_id:
+            for im in imgs:
+                if best_id in (im.get("variant_ids") or []):
+                    src = im.get("src") or ""
+                    if src.startswith("//"): src = "https:" + src
+                    if src: out.append(src)
+        # 2) fallback: alt/Filename-Matching
+        if not out:
+            cands = []
+            for im in imgs:
+                src = im.get("src") or ""
+                if src.startswith("//"): src = "https:" + src
+                alt = (im.get("alt") or "").lower()
+                fname = os.path.basename(urlparse(src).path).lower()
+                score = 0
+                score += sum(1 for t in vtoks if t and (t in alt or t in fname))
+                cands.append((score, src))
+            cands.sort(key=lambda x: x[0], reverse=True)
+            out = [u for s,u in cands if u][:12]
+        return out
+
+    if mode == "js":
+        # product["images"] = [url,...]  (ohne variant_ids); wir scoren nach Dateiname/alt-Anteil
+        urls = []
+        for u in product.get("images", []):
+            if isinstance(u, str):
+                if u.startswith("//"): u = "https:" + u
+                urls.append(u)
+        return urls  # wird später noch gescored
+
+    return out
 
 # ---------- Hersteller-/Quell-Resolver ----------
 class SourceResolver:
+    HORTI_EN = ["https://hortitec.es/en"]
     HORTI = ["https://www.hortitec.de", "https://hortitec.es", "https://www.hortitec.es"]
 
     def __init__(self, manufacturers_cfg_path: pathlib.Path):
@@ -353,7 +449,28 @@ class SourceResolver:
             self.manu_cfg = json.load(open(manufacturers_cfg_path, "r", encoding="utf-8"))
         except Exception:
             self.manu_cfg = {}
-
+            
+    def _guess_horti_en(self, row: ItemRow) -> Optional[str]:
+        # auf der EN-Seite zuerst probieren (bessere Variantenzuordnung in den Metadaten)
+        handles = [
+            slugify(f"{row.brand} {row.name} {row.variant}"),
+            slugify(f"{row.brand} {row.name}"),
+            slugify(row.name),
+            # häufige Größen-Handles:
+            slugify(f"{row.brand} {row.name} 500 ml"),
+            slugify(f"{row.brand} {row.name} 0.5 l"),
+        ]
+        for base in self.HORTI_EN:
+            for h in handles:
+                url = f"{base}/products/{h}"
+                try:
+                    r = self.s.get(url, timeout=8)
+                    if r.ok and "text/html" in r.headers.get("Content-Type",""):
+                        return url
+                except Exception:
+                    continue
+        return None
+        
     def _guess_horti(self, row: ItemRow) -> Optional[str]:
         # häufig passt der Shopify-Produktslug:
         slugs = [
@@ -371,7 +488,43 @@ class SourceResolver:
                 except Exception:
                     continue
         return None
-
+    def discover(self, row: ItemRow) -> Optional[str]:
+        if row.source_url:
+            return row.source_url
+        # 1) Hortitec EN vorrangig
+        url = self._guess_horti_en(row)
+        if url: return url
+        # 2) Hortitec DE/ES
+        url = self._guess_horti(row)
+        if url: return url
+        # 3) Hersteller-Hints + -Suche wie gehabt ...
+        for u in self._manufacturer_hints(row):
+            try:
+                r = self.s.get(u, timeout=8)
+                if r.ok and "text/html" in r.headers.get("Content-Type", ""):
+                    return u
+            except Exception:
+                pass
+        bases = self.manu_cfg.get(row.brand.strip().lower(), [])
+        queries = [f"{row.brand} {row.name} {row.variant}", f"{row.brand} {row.name}", row.name]
+        for base in bases:
+            for q in queries:
+                for path in (f"/?s={requests.utils.quote(q)}", f"/search?q={requests.utils.quote(q)}", f"/products?search={requests.utils.quote(q)}"):
+                    u = base.rstrip("/") + path
+                    try:
+                        r = self.s.get(u, timeout=10)
+                        if not r.ok: continue
+                        soup = BeautifulSoup(r.text, "lxml")
+                        for a in soup.find_all("a", href=True):
+                            href = a["href"]
+                            if href.startswith("/"): href = base.rstrip("/") + href
+                            low = href.lower()
+                            if any(p in low for p in ["/product", "/products", "/produkt", "/producto", "/shop", "/store"]):
+                                return href
+                    except Exception:
+                        continue
+        return None
+        
     def _manufacturer_hints(self, row: ItemRow) -> List[str]:
         # gezielte Treffer, die wir kennen
         brand = row.brand.strip().lower()
@@ -435,22 +588,44 @@ def ensure_german(desc_html: str) -> str:
     text = BeautifulSoup(desc_html or "", "lxml").get_text(" ", strip=True)
     if not text:
         return desc_html
-    # Flag bei jedem Aufruf frisch lesen
+
     auto_flag = os.getenv("AUTO_TRANSLATE_TO_DE", "1").lower() in ("1","true","yes")
+    if not auto_flag:
+        return desc_html
+
     try:
         lang = detect(text)
     except LangDetectException:
         lang = "unknown"
-    if lang == "de" or not auto_flag or GoogleTranslator is None:
+    if lang == "de":
         return desc_html
+
+    # 1) DeepL (falls Key vorhanden)
+    deepl_key = os.getenv("DEEPL_API_KEY", "").strip()
+    if deepl_key:
+        try:
+            import deepl
+            translator = deepl.Translator(deepl_key)
+            # auto-detect source
+            result = translator.translate_text(text, target_lang="DE")
+            if result and result.text:
+                paras = "".join(f"<p>{html.escape(p.strip())}</p>" for p in result.text.split("\n") if p.strip())
+                return paras
+        except Exception as e:
+            logline(f"DeepL translation error: {e}")
+
+    # 2) Fallback: GoogleTranslator
     try:
-        translated = GoogleTranslator(source="auto", target="de").translate(text)
-        if translated and translated.strip():
-            paras = "".join(f"<p>{html.escape(p.strip())}</p>" for p in translated.split("\n") if p.strip())
-            return paras
+        if GoogleTranslator is not None:
+            translated = GoogleTranslator(source="auto", target="de").translate(text)
+            if translated and translated.strip():
+                paras = "".join(f"<p>{html.escape(p.strip())}</p>" for p in translated.split("\n") if p.strip())
+                return paras
     except Exception as e:
-        logline(f"Translation error: {e}")
+        logline(f"GoogleTranslator error: {e}")
+
     return desc_html
+
 POS_KEYS = {"anwendung","dosierung","inhalt","zusammensetzung","npk","gebrauchsanweisung","analyse","hinweis","eigenschaften","beschreibung","produktbeschreibung"}
 NEG_KEYS_HARD = {"menü schließen","menü schliessen","weiterlesen","ähnliche produkte","related products","you may also like","newsletter","breadcrumb","warenkorb","shop","kategorie","filter"}
 NEG_OTHER_PRODUCTS = {"root","supervit","hydro","blüh","blüh","bloom","coco","kokos","complex"}  # typische Hesi-Begriffe anderer Produkte
@@ -622,6 +797,54 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
     url = resolver.discover(row)
     if not url:
         return {"Status": "NO_SOURCE_URL", "SKU": row.sku or row.auto_sku(), "When": now_iso()}
+    # --- Shopify-JSON bevorzugt (perfekt für Varianten-Images) ---
+    shop_json, shop_mode = fetch_shopify_product_json(parser.s, url)
+    source_used = "page"
+    blocks, imgs = [], []
+
+    if shop_json:
+        source_used = f"shopify:{shop_mode}"
+        # Beschreibung
+        if shop_mode == "json":
+            body_html = shop_json.get("body_html") or ""
+            if body_html and len(BeautifulSoup(body_html, "lxml").get_text(" ", strip=True)) > 80:
+                blocks = [body_html]
+        elif shop_mode == "js":
+            # Feld heißt hier einfach "description"
+            desc = shop_json.get("description") or ""
+            if desc and len(desc) > 80:
+                blocks = [f"<p>{html.escape(desc)}</p>"]
+
+        # Bilder für gewünschte Variante
+        imgs = images_for_variant_from_shopify(product=shop_json, mode=shop_mode, variant_text=row.variant)
+
+    # falls noch nichts: klassisch HTML parsen (inkl. JS-Render)
+    if not blocks or not imgs:
+        try:
+            r = parser._get(url, 20)
+            if r.ok and r.text:
+                bl, im = parser.parse_html(r.text, url)
+                if not blocks: blocks = bl
+                if not imgs: imgs = im
+        except Exception as e:
+            logline(f"requests error: {e}")
+
+        # JS-Render bei Bedarf
+        used_js = False
+        def desc_len(blist: List[str]) -> int:
+            return len(BeautifulSoup("\n".join(blist), "lxml").get_text(" ", strip=True))
+        if js_render and (not imgs or desc_len(blocks) < 220):
+            if JSRenderer.available():
+                rendered = JSRenderer.render(url, 26000)
+                if rendered:
+                    used_js = True
+                    bl2, im2 = parser.parse_html(rendered, url)
+                    if desc_len(bl2) >= desc_len(blocks): blocks = bl2 or blocks
+                    if im2 and len(im2) > len(imgs): imgs = im2
+            else:
+                logline("JSRenderer not available; skipping JS render")
+    else:
+        used_js = False  # bei sauberem Shopify-JSON nicht nötig
 
     # 1) Plain Fetch + Parse
     blocks, imgs = [], []
@@ -870,13 +1093,20 @@ def launch_gui():
         for u in item.get("PictureURLs", []):
             try:
                 r = s.get(u, timeout=10); r.raise_for_status()
-                im = Image.open(io.BytesIO(r.content)).convert("RGB"); im.thumbnail((150, 150))
-                tkim = ImageTk.PhotoImage(im); thumb_refs.append(tkim)
+                content = r.content
+                im = Image.open(io.BytesIO(content))
+                # notfalls auf RGB konvertieren
+                if im.mode not in ("RGB","RGBA"):
+                    im = im.convert("RGB")
+                im.thumbnail((150, 150))
+                tkim = ImageTk.PhotoImage(im)
+                thumb_refs.append(tkim)
                 ttk.Label(img_frame, image=tkim).place(x=x, y=6, width=tkim.width(), height=tkim.height()); x += tkim.width()+8
                 img_canvas.configure(scrollregion=(0,0,x,170))
             except Exception as e:
-                logline(f"Image load error: {e}")
+                logline(f"Image load error: {e} :: {u}")
                 continue
+
         try:
             converter = html2text.HTML2Text(); converter.ignore_links=False; converter.ignore_images=True; converter.body_width=0
             txt = converter.handle(item.get("DescriptionHTML",""))
