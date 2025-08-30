@@ -379,11 +379,13 @@ def ensure_german(desc_html: str) -> str:
     text = BeautifulSoup(desc_html or "", "lxml").get_text(" ", strip=True)
     if not text:
         return desc_html
+    # Flag bei jedem Aufruf frisch lesen
+    auto_flag = os.getenv("AUTO_TRANSLATE_TO_DE", "1").lower() in ("1","true","yes")
     try:
         lang = detect(text)
     except LangDetectException:
         lang = "unknown"
-    if lang == "de" or not AUTO_TRANSLATE_TO_DE or GoogleTranslator is None:
+    if lang == "de" or not auto_flag or GoogleTranslator is None:
         return desc_html
     try:
         translated = GoogleTranslator(source="auto", target="de").translate(text)
@@ -393,6 +395,7 @@ def ensure_german(desc_html: str) -> str:
     except Exception as e:
         logline(f"Translation error: {e}")
     return desc_html
+
 
 def combine_description(brand: str, name: str, variant: str, blocks: List[str]) -> str:
     # mehrere Blöcke zusammenfügen, doppelte Inhalte vermeiden
