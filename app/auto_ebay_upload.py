@@ -833,28 +833,28 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
     url = resolver.discover(row)
     if not url:
         return {"Status": "NO_SOURCE_URL", "SKU": row.sku or row.auto_sku(), "When": now_iso()}
+
+    # Falls hortitec, aber nicht /en/, versuche auf EN zu mappen
     from urllib.parse import urlparse as _u
-p = _u(url)
-host = p.netloc.lower()
-# wenn hortitec, aber nicht EN, dann auf EN mappen
-if "hortitec.es" in host and "/en/" not in p.path:
-    mapped = resolver._map_to_en(url)
-    if mapped:
-        url = mapped
-        host = _u(url).netloc.lower()
-    from urllib.parse import urlparse as _u
-    host = _u(url).netloc.lower()
-    prefer_en = ("hortitec.es" in host) and ("/en/" in url)
+    p = _u(url)
+    if "hortitec.es" in p.netloc.lower() and "/en/" not in p.path:
+        mapped = resolver._map_to_en(url)
+        if mapped:
+            url = mapped
+            p = _u(url)
+
+    host = p.netloc.lower()
+    prefer_en = ("hortitec.es" in host) and ("/en/" in p.path)
+
     used_js = False
     back_src = ""
+    source_used = "page"
     blocks, imgs = [], []
 
-    # --- Shopify JSON priorisieren (ideal für Variantenbilder) ---
+    # --- 1) Shopify-JSON priorisieren (perfekt für Variantenbilder) ---
     shop_json, shop_mode = fetch_shopify_product_json(parser.s, url)
-    source_used = "page"
     if shop_json:
         source_used = f"shopify:{shop_mode}"
-        # Beschreibung direkt aus Shopify (EN) -> spätere DE-Übersetzung
         body_html = ""
         if shop_mode == "json":
             body_html = shop_json.get("body_html") or ""
@@ -862,13 +862,14 @@ if "hortitec.es" in host and "/en/" not in p.path:
             body_html = shop_json.get("description") or ""
         if body_html and len(BeautifulSoup(body_html, "lxml").get_text(" ", strip=True)) > 80:
             blocks = [body_html]
-        # Variante: exakt passende Bilder
+        # EXAKTE Variantenbilder (z. B. 0,5 L / 500 ml)
         imgs = images_for_variant_from_shopify(product=shop_json, mode=shop_mode, variant_text=row.variant)
 
-    # --- Falls noch nichts: normales HTML + optional JS-Render ---
+    # Hilfsfunktion für Textlänge
     def desc_len(blist: List[str]) -> int:
         return len(BeautifulSoup("\n".join(blist), "lxml").get_text(" ", strip=True))
 
+    # --- 2) Wenn noch nötig: HTML parsen + optional JS-Render ---
     if not blocks or not imgs:
         try:
             r = parser._get(url, 20)
@@ -885,47 +886,51 @@ if "hortitec.es" in host and "/en/" not in p.path:
                 if rendered:
                     used_js = True
                     bl2, im2 = parser.parse_html(rendered, url)
-                    if desc_len(bl2) >= desc_len(blocks): blocks = bl2 or blocks
-                    if im2 and len(im2) > len(imgs): imgs = im2
+                    if desc_len(bl2) >= desc_len(blocks):
+                        blocks = bl2 or blocks
+                    if im2 and len(im2) > len(imgs):
+                        imgs = im2
             else:
                 logline("JSRenderer not available; skipping JS render")
 
-    # --- Hersteller-Backfill NUR wenn EN nicht primär ist ODER EN nichts lieferte ---
+    # --- 3) Hersteller-Backfill NUR wenn EN-Quelle nicht greift ---
     if (not imgs or desc_len(blocks) < 180) and not prefer_en:
         burl, bblocks, bimgs = manufacturer_backfill(row, parser)
         if burl:
             back_src = burl
-            if desc_len(bblocks) > desc_len(blocks): blocks = bblocks
-            if not imgs and bimgs: imgs = bimgs
+            if desc_len(bblocks) > desc_len(blocks):
+                blocks = bblocks
+            if not imgs and bimgs:
+                imgs = bimgs
 
-
-    # 4) Fallback-Beschreibung, wenn gar nichts
+    # --- 4) Harte Fallback-Beschreibung, falls gar nichts ---
     if desc_len(blocks) == 0:
         key = (row.brand.strip().lower(), row.name.strip().lower())
         if key in FALLBACK_HTML:
             blocks = [FALLBACK_HTML[key]]
             logline(f"Using curated fallback text for {key}")
 
-    # 5) Bilder scoren und ggf. nach Variante filtern
-    from urllib.parse import urlparse as _u
-    src_domain = f"{_u(url).scheme}://{_u(url).netloc}"
+    # --- 5) Bilder scoren + ggf. nach Variante filtern ---
+    src_domain = f"{p.scheme}://{p.netloc}"
     imgs = score_images(imgs, row.brand, row.name, row.variant, src_domain)
+
     if variant_image_filter and row.variant:
         vt = variant_synonyms(row.variant)
         var_imgs = [u for u in imgs if any(t in u.lower() for t in vt)]
         if var_imgs:
             imgs = var_imgs
 
-    # 6) Beschreibung bauen + Deutsch sicherstellen
+    # --- 6) Beschreibung bauen + ins Deutsche bringen ---
     desc_html = combine_description(row.brand, row.name, row.variant, blocks)
     desc_html = ensure_german(desc_html)
 
-    # 7) Preislogik
+    # --- 7) Preislogik ---
     price = float(row.price or 9.99)
     if price_mode == PRICING_AVG10 and row.price:
         price = round(float(row.price) * 0.9, 2)
 
     item = build_item_payload(row, desc_html, imgs, price)
+
     meta = {
         "DescLen": len(html2text.html2text(desc_html or "")),
         "Pics": len(imgs),
@@ -938,9 +943,7 @@ if "hortitec.es" in host and "/en/" not in p.path:
     if dry:
         return {"Status": "DRY_OK", "Preview": item, "SourceURL": url, "When": now_iso(), **meta}
 
-    # ---- eBay Upload (Stub – echte API nur mit Token möglich) ----
-    # Hinweis: Die tatsächliche AddFixedPriceItem/Inventory-API erfordert gültige eBay-Zugangsdaten.
-    # Hier liefern wir "LISTED_OK (Stub)". Wenn du echte Uploads willst, integrieren wir das gern gezielt.
+    # ---- eBay Upload (Stub) ----
     ok, msg = True, "OK (Stub)"
     return {"Status": "LISTED_OK" if ok else "LISTED_FAIL", "Message": msg, "Preview": item, "SourceURL": url, "When": now_iso(), **meta}
 
