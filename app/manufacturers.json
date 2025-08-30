@@ -1,1 +1,21 @@
+{
+  "hesi": [
+    "https://www.hesi.de",
+    "https://www.hesi.eu",
+    "https://www.hesi.com",
+    "https://www.hesi.nl"
+  ],
+  "biobizz": [
+    "https://www.biobizz.de",
+    "https://www.biobizz.com"
+  ],
+  "canna": [
+    "https://www.canna.de",
+    "https://www.canna.com"
+  ],
+  "plagron": [
+    "https://www.plagron.de",
+    "https://www.plagron.com"
+  ]
+}
 
