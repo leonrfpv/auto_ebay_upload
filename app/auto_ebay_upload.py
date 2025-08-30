@@ -850,7 +850,7 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
     logline(f"process_single brand={row.brand} name={row.name} variant={row.variant} js={js_render} dry={dry}")
     resolver = SourceResolver(APPDIR / "manufacturers.json")
     parser = Parser()
-        url = resolver.discover(row)
+    url = resolver.discover(row)
     if not url:
         return {"Status": "NO_SOURCE_URL", "SKU": row.sku or row.auto_sku(), "When": now_iso()}
 
