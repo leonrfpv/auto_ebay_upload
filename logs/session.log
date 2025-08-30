@@ -1,3 +1,0 @@
-
-[2025-08-30 21:14:10] process_single brand=Hesi name=Boost variant=0,5 L js=True dry=True
-[2025-08-30 21:14:23] {"Status": "DRY_OK", "SourceURL": "https://www.hortitec.de/products/hesi-boost-0-5-l", "When": "2025-08-30 21:14:23", "DescLen": 2906, "Pics": 11, "JSUsed": true, "BackfillFrom": "https://hesi.nl/de/Boost"}
