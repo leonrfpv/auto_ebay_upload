@@ -9,4 +9,5 @@ Pillow
 langdetect
 playwright
 deep_translator
+deepl
 
