@@ -27,26 +27,25 @@ Besonders nützlich z. B. für Händler von Düngemitteln oder ähnlichen Produk
 
 ## Installation (Windows 11)
 
-1. Projekt klonen oder ZIP entpacken:
+- **1. Projekt klonen oder ZIP entpacken:**
    ```bash
    git clone https://github.com/leonrfpv/auto_ebay_upload.git
    cd auto_ebay_upload
-   
-2. Installer ausführen:
-  -Doppelklick  "Install_Or_Update.bat"
-  -Erstellt ein virtuelles Python-Umfeld (.venv), installiert alle              Abhängigkeiten und Playwright/Chromium.
 
-3. Grafisches Benutzerinterface Starten:
-  -Run_GUI.bat → normale Nutzung
-  -Run_GUI_Debug.bat → startet mit Logausgabe
-  -Run_GUI_Failsafe.bat → Notfall-Startskript
+- **2. Installer ausführen**:
+  - Doppelklick  `Install_Or_Update.bat`
+  - Erstellt ein virtuelles Python-Umfeld (.venv), installiert alle Abhängigkeiten und Playwright/Chromium.
 
-4. Konfiguration
-  -In app/.env trägst du deine eBay-API-Daten ein (Vorlage: .env.sample).
-  -Standardmäßig läuft alles im SANDBOX-Modus, bis du EBAY_ENV=PROD setzt.
+- **3. Grafisches Benutzerinterface Starten:**
+  - `Run_GUI.bat` → normale Nutzung
+  - `Run_GUI_Debug.bat` → startet mit Logausgabe
+  - `Run_GUI_Failsafe.bat` → Notfall-Startskript
 
-5. Beispiel
+- **4. Konfiguration:**
+  - In app/.env trägst du deine eBay-API-Daten ein (Vorlage: .env.sample).
+  - Standardmäßig läuft alles im SANDBOX-Modus, bis du EBAY_ENV=PROD setzt.
 
-  Eine Beispiel-CSV liegt in input/products_test.csv.
-  Damit kannst du sofort einen Dry-Run machen und die HTML-Vorschau im         Browser öffnen.
+- **5. Beispiel:**
+  - Eine Beispiel-CSV liegt in `input/products_test.csv`.
+  - Damit kannst du sofort einen Dry-Run machen und die HTML-Vorschau im Browser öffnen.
   
