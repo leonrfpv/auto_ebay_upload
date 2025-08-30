@@ -923,7 +923,7 @@ def process_single(row: ItemRow, *, dry: bool, js_render: bool, variant_image_fi
         "DescLen": len(html2text.html2text(desc_html or "")),
         "Pics": len(imgs),
         "JSUsed": used_js,
-        "BackfillFrom": back_src
+        "BackfillFrom": back_src,
         "SourceUsed": source_used,
         "PreferredEN": prefer_en
     }
