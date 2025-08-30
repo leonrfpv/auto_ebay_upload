@@ -342,7 +342,7 @@ class Parser:
         desc_blocks = self._desc_blocks(soup)
         imgs = self._collect_imgs(soup, base)
         return desc_blocks, imgs
-    def _shopify_handle_and_base(product_url: str) -> Tuple[Optional[str], Optional[str]]:
+def _shopify_handle_and_base(product_url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
         p = urlparse(product_url)
         parts = p.path.strip("/").split("/")
